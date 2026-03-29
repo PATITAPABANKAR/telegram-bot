@@ -1,93 +1,94 @@
 import os
 import time
-import requests
-import pandas as pd
 import datetime
+import requests
 
-NEO_TOKEN = os.getenv("NEO_API_TOKEN")
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# ========================
+# 🔐 ENV VARIABLES
+# ========================
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": CHAT_ID, "text": msg})
+# ========================
+# ⏰ MARKET TIME (IST)
+# ========================
+START_TIME = datetime.time(9, 20)
+END_TIME = datetime.time(15, 15)
 
-def get_price(symbol):
+# ========================
+# 📩 TELEGRAM FUNCTION
+# ========================
+def send_telegram(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message}
+    try:
+        requests.post(url, data=payload)
+    except Exception as e:
+        print("Telegram Error:", e)
+
+# ========================
+# 📊 DATA FUNCTION
+# (TEMP MOCK — replace later)
+# ========================
+def get_market_data():
     import random
-    return random.randint(22000, 48000)
+    return random.randint(22000, 22200)
 
-def calculate_signal(prices):
-    df = pd.DataFrame(prices, columns=["close"])
-    df["ema"] = df["close"].ewm(span=44).mean()
+# ========================
+# 🧠 SIGNAL LOGIC
+# ========================
+def generate_signal(price):
+    if price > 22100:
+        return "BUY CE 📈"
+    elif price < 22050:
+        return "BUY PE 📉"
+    return None
 
-    delta = df["close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    df["rsi"] = 100 - (100 / (1 + rs))
+# ========================
+# 🕔 TIME CHECK (IST FIX)
+# ========================
+def get_ist_time():
+    return datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
 
-    latest = df.iloc[-1]
-
-    if latest["close"] > latest["ema"] and latest["rsi"] > 60:
-        return "CE", latest
-    elif latest["close"] < latest["ema"] and latest["rsi"] < 40:
-        return "PE", latest
-    else:
-        return None, latest
-
-def market_open():
-    now = datetime.datetime.now()
-    start = now.replace(hour=9, minute=30, second=0)
-    end = now.replace(hour=15, minute=10, second=0)
-    return start <= now <= end
-
-last_signal_time = {"NIFTY": None, "BANKNIFTY": None}
-
+# ========================
+# 🔁 MAIN LOOP (5 MIN GAP)
+# ========================
 def run_bot():
-    nifty_prices = []
-    banknifty_prices = []
+    last_signal = None
 
     while True:
-        try:
-            if not market_open():
-                print("Market closed...")
-                time.sleep(60)
-                continue
+        now = get_ist_time().time()
 
-            nifty = get_price("NIFTY")
-            banknifty = get_price("BANKNIFTY")
+        if START_TIME <= now <= END_TIME:
+            print("Market Open - Checking signal...")
 
-            nifty_prices.append(nifty)
-            banknifty_prices.append(banknifty)
+            price = get_market_data()
+            signal = generate_signal(price)
 
-            if len(nifty_prices) > 50:
-                nifty_prices.pop(0)
-                banknifty_prices.pop(0)
+            if signal and signal != last_signal:
+                msg = f"""
+📊 NIFTY SIGNAL
 
-            signal, data = calculate_signal(nifty_prices)
-            if signal:
-                now = time.time()
-                if not last_signal_time["NIFTY"] or now - last_signal_time["NIFTY"] > 900:
-                    strike = round(data["close"] / 50) * 50
-                    msg = f"🚨 NIFTY {signal}\nATM: {strike}\nRSI: {data['rsi']:.1f}"
-                    send_telegram(msg)
-                    last_signal_time["NIFTY"] = now
+Price: {price}
+Signal: {signal}
+⏰ Time: {get_ist_time().strftime('%H:%M:%S')}
+"""
+                send_telegram(msg)
+                print("Signal Sent:", signal)
+                last_signal = signal
+            else:
+                print("No new signal")
 
-            signal, data = calculate_signal(banknifty_prices)
-            if signal:
-                now = time.time()
-                if not last_signal_time["BANKNIFTY"] or now - last_signal_time["BANKNIFTY"] > 900:
-                    strike = round(data["close"] / 100) * 100
-                    msg = f"🚨 BANKNIFTY {signal}\nATM: {strike}\nRSI: {data['rsi']:.1f}"
-                    send_telegram(msg)
-                    last_signal_time["BANKNIFTY"] = now
+            time.sleep(300)  # ✅ 5 MINUTES
 
-            time.sleep(60)
+        else:
+            print("Market Closed 😴")
+            time.sleep(300)
 
-        except Exception as e:
-            print("Error:", e)
-            time.sleep(60)
-
+# ========================
+# ▶️ START
+# ========================
 if __name__ == "__main__":
-    send_telegram("🚀 Bot Started")
+    print("Bot Started 🚀")
+    send_telegram("🤖 Bot Started")
     run_bot()
