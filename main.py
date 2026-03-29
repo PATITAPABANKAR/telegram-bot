@@ -1,94 +1,118 @@
-import os
-import time
-import datetime
+import pandas as pd
 import requests
+import schedule
+import time
+import os
+from datetime import datetime
+from ta.momentum import RSIIndicator
+from ta.volatility import AverageTrueRange
+from neo_api_client import NeoAPI
 
-# ========================
-# 🔐 ENV VARIABLES
-# ========================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+# -------- ENV VARIABLES --------
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+API_KEY = os.getenv("API_KEY")
+ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 
-# ========================
-# ⏰ MARKET TIME (IST)
-# ========================
-START_TIME = datetime.time(9, 20)
-END_TIME = datetime.time(15, 15)
-
-# ========================
-# 📩 TELEGRAM FUNCTION
-# ========================
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message}
+# -------- TELEGRAM FUNCTION --------
+def send_telegram(msg):
     try:
-        requests.post(url, data=payload)
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
     except Exception as e:
         print("Telegram Error:", e)
 
-# ========================
-# 📊 DATA FUNCTION
-# (TEMP MOCK — replace later)
-# ========================
-def get_market_data():
-    import random
-    return random.randint(22000, 22200)
+# -------- NEO API SETUP --------
+client = NeoAPI(api_key=API_KEY)
+client.set_access_token(ACCESS_TOKEN)
 
-# ========================
-# 🧠 SIGNAL LOGIC
-# ========================
-def generate_signal(price):
-    if price > 22100:
-        return "BUY CE 📈"
-    elif price < 22050:
-        return "BUY PE 📉"
-    return None
+# -------- FETCH DATA --------
+def get_data():
+    try:
+        data = client.get_historical_data(
+            instrument_token="26009",   # BANKNIFTY (change if needed)
+            interval="5minute",
+            from_date=datetime.now().strftime("%Y-%m-%d") + " 09:15:00",
+            to_date=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
 
-# ========================
-# 🕔 TIME CHECK (IST FIX)
-# ========================
-def get_ist_time():
-    return datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
+        df = pd.DataFrame(data)
 
-# ========================
-# 🔁 MAIN LOOP (5 MIN GAP)
-# ========================
+        if df.empty:
+            return None
+
+        df = df[["open", "high", "low", "close", "volume"]]
+        df = df.astype(float)
+
+        return df
+
+    except Exception as e:
+        print("Neo API Error:", e)
+        return None
+
+# -------- STRATEGY --------
+def check_signal():
+    df = get_data()
+
+    if df is None or len(df) < 50:
+        print("Not enough data")
+        return
+
+    # Indicators
+    df["wma44"] = df["close"].rolling(44).mean()
+    df["rsi"] = RSIIndicator(df["close"], window=14).rsi()
+
+    atr = AverageTrueRange(df["high"], df["low"], df["close"], window=14)
+    df["atr"] = atr.average_true_range()
+
+    df["vol_avg"] = df["volume"].rolling(20).mean()
+
+    latest = df.iloc[-1]
+
+    buy = (
+        latest["close"] > latest["wma44"] and
+        latest["rsi"] > 55 and
+        latest["volume"] > 1.5 * latest["vol_avg"]
+    )
+
+    sell = (
+        latest["close"] < latest["wma44"] and
+        latest["rsi"] < 45 and
+        latest["volume"] > 1.5 * latest["vol_avg"]
+    )
+
+    if buy:
+        msg = f"📈 BUY BANKNIFTY\nPrice: {latest['close']}\nRSI: {latest['rsi']:.2f}"
+        print(msg)
+        send_telegram(msg)
+
+    elif sell:
+        msg = f"📉 SELL BANKNIFTY\nPrice: {latest['close']}\nRSI: {latest['rsi']:.2f}"
+        print(msg)
+        send_telegram(msg)
+
+    else:
+        print("No signal")
+
+# -------- TIME FILTER --------
 def run_bot():
-    last_signal = None
+    now = datetime.now().time()
 
-    while True:
-        now = get_ist_time().time()
+    start = datetime.strptime("09:20", "%H:%M").time()
+    end = datetime.strptime("15:30", "%H:%M").time()
 
-        if START_TIME <= now <= END_TIME:
-            print("Market Open - Checking signal...")
+    if start <= now <= end:
+        print("Running strategy...")
+        check_signal()
+    else:
+        print("Outside trading hours")
 
-            price = get_market_data()
-            signal = generate_signal(price)
+# -------- SCHEDULER --------
+schedule.every(5).minutes.do(run_bot)
 
-            if signal and signal != last_signal:
-                msg = f"""
-📊 NIFTY SIGNAL
+print("Bot Started...")
 
-Price: {price}
-Signal: {signal}
-⏰ Time: {get_ist_time().strftime('%H:%M:%S')}
-"""
-                send_telegram(msg)
-                print("Signal Sent:", signal)
-                last_signal = signal
-            else:
-                print("No new signal")
-
-            time.sleep(300)  # ✅ 5 MINUTES
-
-        else:
-            print("Market Closed 😴")
-            time.sleep(300)
-
-# ========================
-# ▶️ START
-# ========================
-if __name__ == "__main__":
-    print("Bot Started 🚀")
-    send_telegram("🤖 Bot Started")
-    run_bot()
+# -------- LOOP --------
+while True:
+    schedule.run_pending()
+    time.sleep(1)
