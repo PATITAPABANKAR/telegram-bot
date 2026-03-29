@@ -1,9 +1,16 @@
 import os
-
-print("Bot running on Render")
-
-# keep service alive
+import requests
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+TOKEN = os.environ.get("TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
+
+def send_message(text):
+    url = "https://api.telegram.org/bot" + TOKEN + "/sendMessage"
+    data = {"chat_id": CHAT_ID, "text": text}
+    requests.post(url, data=data)
+
+send_message("Bot is live on Render")
 
 PORT = int(os.environ.get("PORT", 10000))
 
