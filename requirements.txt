@@ -1,1 +1,4 @@
+pandas
+python-telegram-bot
 requests
+git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.1
