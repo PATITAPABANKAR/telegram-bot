@@ -1,118 +1,129 @@
-import pandas as pd
-import requests
-import schedule
-import time
 import os
-from datetime import datetime
-from ta.momentum import RSIIndicator
-from ta.volatility import AverageTrueRange
+import time
+import datetime
+import threading
+import requests
+import pandas as pd
+from flask import Flask
+
+# ===== KOTAK NEO API =====
 from neo_api_client import NeoAPI
 
-# -------- ENV VARIABLES --------
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-API_KEY = os.getenv("API_KEY")
-ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
+app = Flask(__name__)
 
-# -------- TELEGRAM FUNCTION --------
+# ===== ENV VARIABLES =====
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+
+NEO_API_KEY = os.getenv("NEO_API_KEY")
+NEO_ACCESS_TOKEN = os.getenv("NEO_ACCESS_TOKEN")
+
+# ===== INIT NEO =====
+client = NeoAPI(api_key=NEO_API_KEY)
+client.set_access_token(NEO_ACCESS_TOKEN)
+
+# ===== TELEGRAM =====
 def send_telegram(msg):
     try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg}, timeout=10)
     except Exception as e:
         print("Telegram Error:", e)
 
-# -------- NEO API SETUP --------
-client = NeoAPI(api_key=API_KEY)
-client.set_access_token(ACCESS_TOKEN)
-
-# -------- FETCH DATA --------
-def get_data():
+# ===== FETCH DATA FROM NEO =====
+def get_data(instrument_token):
     try:
-        data = client.get_historical_data(
-            instrument_token="26009",   # BANKNIFTY (change if needed)
-            interval="5minute",
-            from_date=datetime.now().strftime("%Y-%m-%d") + " 09:15:00",
-            to_date=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        data = client.get_ohlc(
+            exchange="NSE",
+            tradingsymbol=instrument_token,
+            interval="5minute"
         )
 
-        df = pd.DataFrame(data)
+        df = pd.DataFrame(data["data"])
+        df = df.rename(columns={
+            "open_price": "open",
+            "high_price": "high",
+            "low_price": "low",
+            "close_price": "close",
+            "volume": "volume"
+        })
 
-        if df.empty:
-            return None
-
-        df = df[["open", "high", "low", "close", "volume"]]
         df = df.astype(float)
-
         return df
 
     except Exception as e:
-        print("Neo API Error:", e)
+        print("Neo Data Error:", e)
         return None
 
-# -------- STRATEGY --------
-def check_signal():
-    df = get_data()
-
-    if df is None or len(df) < 50:
-        print("Not enough data")
-        return
-
-    # Indicators
+# ===== INDICATORS =====
+def calculate(df):
     df["wma44"] = df["close"].rolling(44).mean()
-    df["rsi"] = RSIIndicator(df["close"], window=14).rsi()
 
-    atr = AverageTrueRange(df["high"], df["low"], df["close"], window=14)
-    df["atr"] = atr.average_true_range()
+    delta = df["close"].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss
+    df["rsi"] = 100 - (100 / (1 + rs))
 
     df["vol_avg"] = df["volume"].rolling(20).mean()
+    return df
 
-    latest = df.iloc[-1]
+# ===== SIGNAL =====
+def generate_signal(name, token):
+    df = get_data(token)
+    if df is None or len(df) < 50:
+        return None
 
-    buy = (
-        latest["close"] > latest["wma44"] and
-        latest["rsi"] > 55 and
-        latest["volume"] > 1.5 * latest["vol_avg"]
-    )
+    df = calculate(df)
+    last = df.iloc[-1]
 
-    sell = (
-        latest["close"] < latest["wma44"] and
-        latest["rsi"] < 45 and
-        latest["volume"] > 1.5 * latest["vol_avg"]
-    )
+    if last["close"] > last["wma44"] and last["rsi"] > 55 and last["volume"] > last["vol_avg"]:
+        return f"BUY {name}"
 
-    if buy:
-        msg = f"📈 BUY BANKNIFTY\nPrice: {latest['close']}\nRSI: {latest['rsi']:.2f}"
-        print(msg)
-        send_telegram(msg)
+    elif last["close"] < last["wma44"] and last["rsi"] < 45 and last["volume"] > last["vol_avg"]:
+        return f"SELL {name}"
 
-    elif sell:
-        msg = f"📉 SELL BANKNIFTY\nPrice: {latest['close']}\nRSI: {latest['rsi']:.2f}"
-        print(msg)
-        send_telegram(msg)
+    return None
 
-    else:
-        print("No signal")
+# ===== TIME =====
+def market_time():
+    now = datetime.datetime.now().time()
+    return datetime.time(9,20) <= now <= datetime.time(15,15)
 
-# -------- TIME FILTER --------
+# ===== MAIN BOT =====
 def run_bot():
-    now = datetime.now().time()
+    print("Bot Started")
 
-    start = datetime.strptime("09:20", "%H:%M").time()
-    end = datetime.strptime("15:30", "%H:%M").time()
+    # 🔴 IMPORTANT: PUT CORRECT TOKENS
+    instruments = {
+        "NIFTY": "NIFTY 50",
+        "BANKNIFTY": "NIFTY BANK"
+    }
 
-    if start <= now <= end:
-        print("Running strategy...")
-        check_signal()
-    else:
-        print("Outside trading hours")
+    while True:
+        try:
+            if market_time():
+                for name, token in instruments.items():
+                    sig = generate_signal(name, token)
+                    if sig:
+                        print(sig)
+                        send_telegram(sig)
 
-# -------- SCHEDULER --------
-schedule.every(5).minutes.do(run_bot)
+                time.sleep(300)
+            else:
+                time.sleep(60)
 
-print("Bot Started...")
+        except Exception as e:
+            print("Main Error:", e)
+            time.sleep(60)
 
-# -------- LOOP --------
-while True:
-    schedule.run_pending()
-    time.sleep(1)
+# ===== FLASK =====
+@app.route("/")
+def home():
+    return "Bot Running"
+
+# ===== START =====
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    threading.Thread(target=run_bot, daemon=True).start()
+    app.run(host="0.0.0.0", port=port)
